@@ -33,7 +33,7 @@ http://127.0.0.1:17854
 
 ## Requirements
 
-- macOS for Codex App controls and Keychain storage.
+- macOS or Windows.
 - Node.js 20 or newer.
 - Codex App or Codex CLI.
 - An OpenCode Go API key for OpenCode mode.
@@ -128,7 +128,7 @@ Codex keeps its normal project files and chat history. Chats already backed by N
 ## Safety
 
 - The dashboard binds to `127.0.0.1` only.
-- API keys are stored in macOS Keychain, with a private `0600` file fallback.
+- API keys are stored in macOS Keychain or encrypted with Windows DPAPI, with a private `0600` file fallback on other platforms.
 - Config backups are written before changes.
 - Dashboard state-changing requests require a local session token.
 - Logs intentionally exclude prompts, message content, headers, and keys.

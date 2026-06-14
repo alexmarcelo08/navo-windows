@@ -37,7 +37,7 @@ function spawnNavo(args, env) {
       ...process.env,
       ...env
     },
-    stdio: ["ignore", "pipe", "pipe"]
+    stdio: ["pipe", "pipe", "pipe"]
   });
 }
 
@@ -501,8 +501,10 @@ test("configure writes Navo state and backups with private file modes", async ()
   assert.equal(exitCode, 0);
 
   const backupDir = join(homes.navoHome, "backups");
-  assert.equal(statSync(homes.navoHome).mode & 0o777, 0o700);
-  assert.equal(statSync(backupDir).mode & 0o777, 0o700);
+  if (process.platform !== "win32") {
+    assert.equal(statSync(homes.navoHome).mode & 0o777, 0o700);
+    assert.equal(statSync(backupDir).mode & 0o777, 0o700);
+  }
 
   const catalog = JSON.parse(readFileSync(join(homes.codexHome, "navo-models.json"), "utf8"));
   const flash = catalog.models.find((model) => model.slug === "deepseek-v4-flash");
@@ -532,7 +534,9 @@ test("configure writes Navo state and backups with private file modes", async ()
 
   const backups = readdirSync(backupDir).filter((name) => name.endsWith(".toml"));
   assert.equal(backups.length, 1);
-  assert.equal(statSync(join(backupDir, backups[0])).mode & 0o777, 0o600);
+  if (process.platform !== "win32") {
+    assert.equal(statSync(join(backupDir, backups[0])).mode & 0o777, 0o600);
+  }
 
   const status = await runNavo(["status"], {
     NAVO_HOME: homes.navoHome,
@@ -540,6 +544,50 @@ test("configure writes Navo state and backups with private file modes", async ()
   });
   assert.equal(status.code, 0, status.stderr);
   assert.match(status.stdout, new RegExp(`127\\.0\\.0\\.1:${configuredPort}`, "u"));
+});
+
+test("Windows stores the OpenCode key encrypted and can read it back", {
+  skip: process.platform !== "win32"
+}, async () => {
+  const homes = tempHomes();
+  const token = "ocgo-test-secret-value";
+  const login = spawnNavo(["login", "--stdin"], {
+    NAVO_HOME: homes.navoHome,
+    CODEX_HOME: homes.codexHome
+  });
+  login.stdin?.end(token);
+  let loginStderr = "";
+  login.stderr.on("data", (chunk) => {
+    loginStderr += chunk;
+  });
+  const loginCode = await new Promise((resolve) => login.once("exit", resolve));
+  assert.equal(loginCode, 0, loginStderr);
+
+  const encryptedPath = join(homes.navoHome, "api-key.dpapi");
+  assert.equal(existsSync(encryptedPath), true);
+  assert.equal(readFileSync(encryptedPath, "utf8").includes(token), false);
+  assert.equal(existsSync(join(homes.navoHome, "api-key")), false);
+
+  const readback = await runNavo(["token"], {
+    NAVO_HOME: homes.navoHome,
+    CODEX_HOME: homes.codexHome
+  });
+  assert.equal(readback.code, 0, readback.stderr);
+  assert.equal(readback.stdout.trim(), token);
+});
+
+test("logs command reads the requested trailing lines without external tail", async () => {
+  const homes = tempHomes();
+  mkdirSync(homes.navoHome, { recursive: true });
+  writeFileSync(join(homes.navoHome, "proxy.log"), "one\ntwo\nthree\n", "utf8");
+
+  const result = await runNavo(["logs", "--lines", "2"], {
+    NAVO_HOME: homes.navoHome,
+    CODEX_HOME: homes.codexHome,
+    PATH: ""
+  });
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stdout, "two\nthree\n");
 });
 
 test("configure normalizes the documented Kimi K2.7 alias to the Codex config id", async () => {
@@ -559,4 +607,28 @@ test("configure normalizes the documented Kimi K2.7 alias to the Codex config id
 
   const config = readFileSync(join(homes.codexHome, "config.toml"), "utf8");
   assert.match(config, /model = "kimi-k2\.7-code"/u);
+});
+
+test("status recognizes the Windows model catalog path written as a TOML string", {
+  skip: process.platform !== "win32"
+}, async () => {
+  const homes = tempHomes();
+  const configured = await runNavo([
+    "configure",
+    "--model",
+    "deepseek-v4-flash",
+    "--port",
+    String(await freePort())
+  ], {
+    NAVO_HOME: homes.navoHome,
+    CODEX_HOME: homes.codexHome
+  });
+  assert.equal(configured.code, 0, configured.stderr);
+
+  const status = await runNavo(["status"], {
+    NAVO_HOME: homes.navoHome,
+    CODEX_HOME: homes.codexHome
+  });
+  assert.equal(status.code, 0, status.stderr);
+  assert.match(status.stdout, /OpenCode Go model catalog: present/u);
 });

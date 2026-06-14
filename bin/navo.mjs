@@ -9,6 +9,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readdirSync,
   unlinkSync,
   writeFileSync
 } from "node:fs";
@@ -48,6 +49,7 @@ const KEYCHAIN_SERVICE = "navo";
 const KEYCHAIN_ACCOUNT = "default";
 const APP_DIR = process.env.NAVO_HOME || join(os.homedir(), ".navo");
 const FILE_TOKEN_PATH = join(APP_DIR, "api-key");
+const WINDOWS_TOKEN_PATH = join(APP_DIR, "api-key.dpapi");
 const BACKUP_DIR = join(APP_DIR, "backups");
 const PID_PATH = join(APP_DIR, "proxy.pid");
 const LOG_PATH = join(APP_DIR, "proxy.log");
@@ -397,6 +399,17 @@ function launchCodex({ preferActivate = true } = {}) {
     }
     console.log("Launched Codex App.");
     return;
+  }
+
+  if (process.platform === "win32") {
+    const result = spawnSync("explorer.exe", ["shell:AppsFolder\\OpenAI.Codex_2p2nqsd0c76g0!App"], {
+      encoding: "utf8",
+      windowsHide: true
+    });
+    if (!result.error && result.status === 0) {
+      console.log("Launched Codex App.");
+      return;
+    }
   }
 
   const result = spawnSync("codex", ["app"], { encoding: "utf8" });
@@ -1528,6 +1541,19 @@ function faviconSvg() {
 }
 
 function openUrlOnce(url, options = {}) {
+  if (process.platform === "win32") {
+    const result = spawnSync("rundll32.exe", ["url.dll,FileProtocolHandler", url], {
+      encoding: "utf8",
+      windowsHide: true
+    });
+    if (result.error || result.status !== 0) {
+      console.warn(`Could not open browser: ${result.error?.message || result.stderr || "unknown error"}`);
+      return;
+    }
+    rememberUiOpened(url);
+    return;
+  }
+
   if (process.platform !== "darwin") {
     return;
   }
@@ -3492,16 +3518,10 @@ function printLogs(options) {
     return;
   }
 
-  const result = spawnSync("tail", ["-n", String(count), logPath], {
-    encoding: "utf8"
-  });
-  if (result.error) {
-    throw result.error;
+  const linesOut = tailFileLines(logPath, count);
+  if (linesOut.length > 0) {
+    process.stdout.write(`${linesOut.join("\n")}\n`);
   }
-  if (result.status !== 0) {
-    throw new Error((result.stderr || "Failed to read activity log.").trim());
-  }
-  process.stdout.write(result.stdout);
 }
 
 function recentLogLines(lines = 100) {
@@ -3513,18 +3533,14 @@ function recentLogLines(lines = 100) {
     return { path: logPath, lines: [] };
   }
 
-  const result = spawnSync("tail", ["-n", String(count), logPath], {
-    encoding: "utf8"
-  });
-  if (result.error || result.status !== 0) {
-    const detail = result.error?.message || result.stderr || "Failed to read activity log.";
-    return { path: logPath, lines: [detail.trim()] };
-  }
-
   return {
     path: logPath,
-    lines: result.stdout.split(/\r?\n/).filter(Boolean)
+    lines: tailFileLines(logPath, count)
   };
+}
+
+function tailFileLines(path, count) {
+  return readFileSync(path, "utf8").split(/\r?\n/u).filter(Boolean).slice(-count);
 }
 
 function clearActivityLog() {
@@ -4654,8 +4670,23 @@ function removeOwnedCatalogIfUnused(configPath) {
 function readTopLevelValue(text, key) {
   const firstTable = text.search(/^\s*\[/m);
   const preamble = firstTable === -1 ? text : text.slice(0, firstTable);
-  const match = preamble.match(new RegExp(`^\\s*${escapeRegExp(key)}\\s*=\\s*["']?([^"'\\n#]+)["']?`, "m"));
-  return match?.[1]?.trim();
+  const match = preamble.match(new RegExp(`^\\s*${escapeRegExp(key)}\\s*=\\s*(.+?)\\s*(?:#.*)?$`, "m"));
+  if (!match) {
+    return undefined;
+  }
+
+  const raw = match[1].trim();
+  if (raw.startsWith('"')) {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return undefined;
+    }
+  }
+  if (raw.startsWith("'") && raw.endsWith("'")) {
+    return raw.slice(1, -1);
+  }
+  return raw;
 }
 
 function validateModel(model, force) {
@@ -5205,16 +5236,23 @@ function listBackupFiles() {
       continue;
     }
 
-    const result = spawnSync("find", [backupDir, "-type", "f", "-name", "*.toml", "-print"], {
-      encoding: "utf8"
-    });
-
-    if (result.status === 0) {
-      files.push(...result.stdout.split("\n").filter(Boolean));
-    }
+    files.push(...findTomlFiles(backupDir));
   }
 
   return uniquePaths(files).sort();
+}
+
+function findTomlFiles(dir) {
+  const files = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...findTomlFiles(path));
+    } else if (entry.isFile() && entry.name.endsWith(".toml")) {
+      files.push(path);
+    }
+  }
+  return files;
 }
 
 function isManagedConfig(text) {
@@ -5272,6 +5310,14 @@ function chmodBestEffort(path, mode) {
 function storeToken(token) {
   ensurePrivateAppDir();
 
+  if (process.platform === "win32") {
+    writeWindowsProtectedToken(token);
+    if (existsSync(FILE_TOKEN_PATH)) {
+      unlinkSync(FILE_TOKEN_PATH);
+    }
+    return;
+  }
+
   if (process.platform === "darwin" && commandExists("security")) {
     spawnSync("security", ["delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", KEYCHAIN_ACCOUNT], {
       stdio: "ignore"
@@ -5312,11 +5358,18 @@ function clearStoredToken() {
   if (existsSync(FILE_TOKEN_PATH)) {
     unlinkSync(FILE_TOKEN_PATH);
   }
+  if (existsSync(WINDOWS_TOKEN_PATH)) {
+    unlinkSync(WINDOWS_TOKEN_PATH);
+  }
 }
 
 function readStoredToken() {
   if (process.env.OPENCODE_API_KEY?.trim()) {
     return process.env.OPENCODE_API_KEY.trim();
+  }
+
+  if (process.platform === "win32" && existsSync(WINDOWS_TOKEN_PATH)) {
+    return readWindowsProtectedToken();
   }
 
   if (process.platform === "darwin" && commandExists("security")) {
@@ -5362,6 +5415,10 @@ function tokenStoreName() {
     return "OPENCODE_API_KEY";
   }
 
+  if (process.platform === "win32" && existsSync(WINDOWS_TOKEN_PATH)) {
+    return "Windows DPAPI";
+  }
+
   if (process.platform === "darwin" && commandExists("security")) {
     const services = [[KEYCHAIN_SERVICE, "macOS Keychain"]];
     for (const [service, label] of services) {
@@ -5380,6 +5437,48 @@ function tokenStoreName() {
   }
 
   return FILE_TOKEN_PATH;
+}
+
+function powershellExecutable() {
+  return join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+}
+
+function writeWindowsProtectedToken(token) {
+  const script = [
+    "Add-Type -AssemblyName System.Security",
+    "$plain = [Console]::In.ReadToEnd()",
+    "$bytes = [Text.Encoding]::UTF8.GetBytes($plain)",
+    "$protected = [Security.Cryptography.ProtectedData]::Protect($bytes, $null, [Security.Cryptography.DataProtectionScope]::CurrentUser)",
+    "[Console]::Out.Write([Convert]::ToBase64String($protected))"
+  ].join("; ");
+  const result = spawnSync(powershellExecutable(), ["-NoProfile", "-NonInteractive", "-Command", script], {
+    input: token,
+    encoding: "utf8",
+    windowsHide: true
+  });
+  if (result.error || result.status !== 0 || !result.stdout.trim()) {
+    throw new Error((result.error?.message || result.stderr || "Windows DPAPI encryption failed.").trim());
+  }
+  writePrivateFile(WINDOWS_TOKEN_PATH, `${result.stdout.trim()}\n`);
+}
+
+function readWindowsProtectedToken() {
+  const script = [
+    "Add-Type -AssemblyName System.Security",
+    "$encoded = [Console]::In.ReadToEnd().Trim()",
+    "$protected = [Convert]::FromBase64String($encoded)",
+    "$bytes = [Security.Cryptography.ProtectedData]::Unprotect($protected, $null, [Security.Cryptography.DataProtectionScope]::CurrentUser)",
+    "[Console]::Out.Write([Text.Encoding]::UTF8.GetString($bytes))"
+  ].join("; ");
+  const result = spawnSync(powershellExecutable(), ["-NoProfile", "-NonInteractive", "-Command", script], {
+    input: readFileSync(WINDOWS_TOKEN_PATH, "utf8"),
+    encoding: "utf8",
+    windowsHide: true
+  });
+  if (result.error || result.status !== 0 || !result.stdout.trim()) {
+    throw new Error((result.error?.message || result.stderr || "Windows DPAPI decryption failed.").trim());
+  }
+  return result.stdout.trim();
 }
 
 async function proxyHealth(port) {
@@ -5479,7 +5578,8 @@ function readUiPort(options) {
 }
 
 function commandExists(command) {
-  const result = spawnSync("which", [command], {
+  const locator = process.platform === "win32" ? "where.exe" : "which";
+  const result = spawnSync(locator, [command], {
     stdio: "ignore"
   });
   return result.status === 0;
