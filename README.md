@@ -31,6 +31,48 @@ The dashboard opens at:
 http://127.0.0.1:17854
 ```
 
+## Windows Installation
+
+This fork includes native Windows support that is not available in the upstream
+npm release yet. Install it directly from GitHub in PowerShell:
+
+```powershell
+npm install -g github:alexmarcelo08/navo-windows
+navo ui
+```
+
+In the dashboard:
+
+1. Enter your OpenCode Go API key.
+2. Test the connection.
+3. Select an OpenCode model.
+4. Enable OpenCode mode and restart Codex.
+5. Open a new Codex chat so the saved provider is loaded.
+
+Navo encrypts the API key with Windows DPAPI for the current Windows account.
+The dashboard and model proxy listen only on `127.0.0.1`.
+
+Confirm that Codex is using the configured route:
+
+```powershell
+navo status
+navo probe-routing
+navo verify --fresh
+navo logs --lines 20
+```
+
+Update this fork:
+
+```powershell
+npm install -g github:alexmarcelo08/navo-windows
+```
+
+Return Codex to its native OpenAI provider:
+
+```powershell
+navo off
+```
+
 ## Requirements
 
 - macOS or Windows.
